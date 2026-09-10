@@ -1,0 +1,12 @@
+{
+  "telegram_token": "SET_ON_SERVER",
+  "allowed_users": [],
+  "ilo_url": "https://ILO_ADDRESS",
+  "ilo_username": "monitoring",
+  "ilo_password": "SET_ON_SERVER",
+  "ilo_cert_sha256": "",
+  "server_name": "HP ML350 Gen9",
+  "poll_seconds": 60,
+  "failure_threshold": 3,
+  "state_dir": "/var/lib/ilo-telegram-bot"
+}

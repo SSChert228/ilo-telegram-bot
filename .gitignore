@@ -1,0 +1,24 @@
+config.json
+*.secret.json
+*.dpapi
+runtime-state.json
+state/
+__pycache__/
+*.pyc
+.venv/
+
+# Local deployment tools, machine data, verification and publication records.
+ops.py
+DEPLOYMENT.local.md
+TEST-REPORT.ru.md
+automated-test-results.json
+server-verification.json
+ilo-snapshot.json
+publication*.json
+*.local.*
+*.pem
+*.key
+.env
+.env.*
+*.log
+config.json.*

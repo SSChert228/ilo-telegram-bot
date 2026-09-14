@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 from ilo import IloClient, IloError, first, health, issues, present, log_time
+from domains import DomainMonitor, domain_fingerprint, domain_changes
 
 LOG = logging.getLogger('ilo-bot')
 LABELS = {'OK': '✅ исправно', 'Warning': '⚠️ предупреждение', 'Critical': '🔴 неисправность',
@@ -20,18 +21,22 @@ LABELS = {'OK': '✅ исправно', 'Warning': '⚠️ предупрежд�
           'Absent': 'не установлен', 'Disabled': 'отключён', 'StandbyOffline': 'резерв'}
 BUTTONS = {'📊 Состояние': 'status', '🌡 Температуры': 'temps', '🌀 Вентиляторы': 'fans',
            '⚡ Питание': 'power', '💾 Диски и RAID': 'storage', '📋 Журнал': 'logs',
-           '🖥 О сервере': 'info', '🔔 Уведомления': 'alerts', '❓ Помощь': 'help'}
+           '🖥 О сервере': 'info', '🌐 Домены': 'domains', '🔔 Уведомления': 'alerts',
+           '❓ Помощь': 'help'}
 KEYBOARD = {'keyboard': [[{'text': label} for label in list(BUTTONS)[i:i+3]]
                          for i in range(0, len(BUTTONS), 3)], 'resize_keyboard': True}
 COMMANDS = [('status', 'Общее состояние'), ('temps', 'Температуры'), ('fans', 'Вентиляторы'),
             ('power', 'Питание и блоки питания'), ('storage', 'Диски и RAID'),
-            ('logs', 'Последние записи IML'), ('info', 'О сервере'),
+            ('logs', 'Последние записи IML'), ('info', 'О сервере'), ('domains', 'Домены, DNS и назначения служб'),
             ('alerts', 'Состояние уведомлений'), ('alerts_on', 'Включить уведомления'),
             ('alerts_off', 'Выключить уведомления'), ('help', 'Помощь')]
 HELP = ('Мониторинг сервера через iLO 4\n\n' + '\n'.join('/' + c + ' — ' + d for c, d in COMMANDS)
         + '\n\nОпрос раз в минуту. /start включает уведомления в этом чате. '
         'Сообщаю об изменениях неисправностей и восстановлении; одинаковые предупреждения не повторяю. '
         'При недоступности iLO жду 3 неудачных опроса.\n\n'
+        '/domains — домены и назначения служб. DNS обновляется по умолчанию раз в 5 минут. '
+        'Подписчикам сообщаю об изменениях DNS; первый опрос задаёт исходное состояние. '
+        'Полный список имён в заданных зонах доступен при подключении API REG.RU.\n\n'
         'Бот работает в ВМ apps: при остановке всего физического сервера он тоже остановится. '
         'Данные iLO описывают оборудование, а не загрузку CPU/RAM операционной системы.')
 
@@ -215,6 +220,7 @@ class State:
         self.data = json.loads(self.file.read_text(encoding='utf-8')) if self.file.exists() else {}
         self.data.setdefault('subscribers', [])
         self.data.setdefault('notified', {})
+        self.data.setdefault('domains_notified', {})
         self.data.setdefault('offset', 0)
 
     def save(self):
@@ -289,6 +295,7 @@ class Bot:
         self.stop = threading.Event()
         self.telegram = telegram or Telegram(config)
         self.monitor = Monitor(config, self.state, self.stop)
+        self.domains = DomainMonitor(config.get('domains'), self.state, self.stop)
         self.last_request = {}
         self.username = ''
 
@@ -320,6 +327,8 @@ class Bot:
                 subscribers.add(uid) if enabled else subscribers.discard(uid)
                 self.state.data['subscribers'] = sorted(subscribers)
                 self.state.data['notified'][str(uid)] = copy.deepcopy(self.monitor.current)
+                domain_snapshot = self.state.data.get('domains_snapshot')
+                self.state.data['domains_notified'][str(uid)] = domain_fingerprint(domain_snapshot) if domain_snapshot else None
                 self.state.save()
             response = 'Уведомления включены.' if enabled else 'Уведомления выключены. Команды продолжают работать.'
             if command == 'start':
@@ -329,6 +338,8 @@ class Bot:
         elif command == 'alerts':
             response = ('Уведомления: ' + ('включены' if uid in self.state.data['subscribers'] else 'выключены')
                         + '\n/alerts_on — включить\n/alerts_off — выключить')
+        elif command == 'domains':
+            response = self.domains.report()
         elif command == 'logs':
             try:
                 response = format_logs(self.monitor.ilo.logs())
@@ -344,6 +355,7 @@ class Bot:
         LOG.info('Command handled: user=%d command=%s', uid, command if command in {c for c, _ in COMMANDS} | {'start', 'stop'} else 'other')
 
     def notify(self):
+        self.notify_domains()
         with self.state.lock:
             if not self.monitor.ready:
                 return
@@ -369,14 +381,48 @@ class Bot:
                 self.state.data['notified'][str(uid)] = current
                 self.state.save()
 
+    def notify_domains(self):
+        with self.state.lock:
+            if not self.domains.enabled or not self.domains.ready:
+                return
+            current = domain_fingerprint(self.state.data['domains_snapshot'])
+            subscribers = sorted(set(self.state.data['subscribers']) & self.allowed)
+        for uid in subscribers:
+            with self.state.lock:
+                previous = self.state.data['domains_notified'].get(str(uid))
+                if previous is None:
+                    self.state.data['domains_notified'][str(uid)] = current
+                    self.state.save()
+                    continue
+            text = domain_changes(previous, current)
+            if not text:
+                continue
+            try:
+                self.telegram.send(uid, self.config['server_name'] + '\n' + text)
+            except TelegramError as exc:
+                LOG.warning('DNS alert delivery failed: user=%d code=%d', uid, exc.code)
+                if exc.code == 403:
+                    with self.state.lock:
+                        self.state.data['subscribers'].remove(uid)
+                        self.state.save()
+                if exc.code == 429:
+                    self.stop.wait(min(max(exc.retry_after, 1), 300))
+                continue
+            with self.state.lock:
+                self.state.data['domains_notified'][str(uid)] = current
+                self.state.save()
+
     def run(self):
-        thread = threading.Thread(target=self.monitor.run, daemon=True, name='ilo-monitor')
-        thread.start()
+        workers = [threading.Thread(target=self.monitor.run, daemon=True, name='ilo-monitor')]
+        if self.domains.enabled:
+            workers.append(threading.Thread(target=self.domains.run, daemon=True, name='domain-monitor'))
+        for thread in workers:
+            thread.start()
         configured = False
         while not self.stop.is_set():
             try:
-                if not thread.is_alive():
-                    raise RuntimeError('iLO monitor worker stopped')
+                if any(not thread.is_alive() for thread in workers):
+                    raise RuntimeError('Monitor worker stopped')
                 if not configured:
                     self.username = self.telegram.call('getMe')['username']
                     if self.telegram.call('getWebhookInfo').get('url'):
@@ -402,7 +448,8 @@ class Bot:
                     raise RuntimeError('Telegram authorization/polling conflict: ' + str(exc.code)) from None
                 LOG.warning('Telegram temporarily unavailable: code=%d', exc.code)
                 self.stop.wait(min(max(exc.retry_after, 5), 300))
-        thread.join(timeout=15)
+        for thread in workers:
+            thread.join(timeout=15)
 
 
 def main():

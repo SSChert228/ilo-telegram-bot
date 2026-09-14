@@ -2,7 +2,7 @@
 set -eu
 test "$(id -u)" = 0 || { echo 'Run with sudo'; exit 1; }
 cd "$(dirname "$0")"
-python3 -m unittest -v test_bot.py
+python3 -m unittest discover -v
 python3 bot.py --config config.json --check
 if ! id ilo-bot >/dev/null 2>&1; then
     useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin ilo-bot
@@ -12,7 +12,7 @@ install -d -o root -g ilo-bot -m 0750 /etc/ilo-telegram-bot
 if test -f /etc/ilo-telegram-bot/config.json; then
     install -m 0600 /etc/ilo-telegram-bot/config.json /etc/ilo-telegram-bot/config.json.previous
 fi
-for file in bot.py ilo.py test_bot.py integration_alert_test.py README.md README.ru.md; do
+for file in bot.py ilo.py domains.py test_bot.py test_domains.py integration_alert_test.py README.md README.ru.md; do
     install -o root -g root -m 0644 "$file" /opt/homelab/bots/ilo-telegram-bot/
 done
 install -o root -g ilo-bot -m 0640 config.json /etc/ilo-telegram-bot/config.json

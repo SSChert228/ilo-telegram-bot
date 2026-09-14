@@ -8,5 +8,17 @@
   "server_name": "HP ML350 Gen9",
   "poll_seconds": 60,
   "failure_threshold": 3,
-  "state_dir": "/var/lib/ilo-telegram-bot"
+  "state_dir": "/var/lib/ilo-telegram-bot",
+  "domains": {
+    "zones": ["example.com"],
+    "names": ["www.example.com"],
+    "server_ips": ["192.0.2.1"],
+    "poll_seconds": 300,
+    "routes": {
+      "www.example.com": {
+        "target": "Сайт → 192.0.2.10:8080",
+        "confirmed": false
+      }
+    }
+  }
 }

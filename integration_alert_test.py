@@ -2,6 +2,7 @@
 import argparse
 import json
 import tempfile
+import time
 from unittest.mock import MagicMock
 from pathlib import Path
 
@@ -21,10 +22,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--chat-id', type=int, required=True)
+    parser.add_argument('--domains', action='store_true', help='Test two DNS change alerts instead of hardware alerts')
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
     production = json.loads((Path(config['state_dir']) / 'state.json').read_text())
-    assert args.chat_id in config['allowed_users'] and args.chat_id in production['subscribers']
+    if args.chat_id not in config['allowed_users'] or args.chat_id not in production['subscribers']:
+        raise SystemExit('Test recipient must be an allowed subscriber')
     snapshot = production['snapshot']
     config['server_name'] = '🧪 ТЕСТ уведомлений (симуляция, сервер работает штатно)'
     with tempfile.TemporaryDirectory(prefix='ilo-bot-alert-test-') as directory:
@@ -32,6 +35,25 @@ def main():
         telegram = CountTelegram(config)
         bot = Bot(config, telegram)
         bot.state.data['subscribers'] = [args.chat_id]
+        if args.domains:
+            if not bot.domains.enabled:
+                raise SystemExit('Domain monitoring is not configured')
+            bot.state.data['domains_snapshot'] = {'collected_at': time.time(), 'rows': [
+                {'name': 'test.example.invalid', 'status': 'OK',
+                 'records': [('A', 'test.example.invalid', '192.0.2.1')]}]}
+            bot.domains.ready = True
+            bot.notify()
+            assert telegram.sent == 0
+            row = bot.state.data['domains_snapshot']['rows'][0]
+            for expected, address in enumerate(['192.0.2.2', '192.0.2.1'], 1):
+                row['records'] = [('A', 'test.example.invalid', address)]
+                bot.notify()
+                bot.notify()
+                assert telegram.sent == expected
+            print(json.dumps({'dns_alert_integration': 'passed', 'messages_sent': telegram.sent,
+                              'deduplication': 'passed', 'dns_modified': False,
+                              'production_state_modified': False}))
+            return
         bot.monitor.ilo.snapshot = MagicMock(side_effect=IloError('simulated outage'))
         for _ in range(2):
             bot.monitor.collect()
